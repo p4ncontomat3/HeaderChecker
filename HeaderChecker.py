@@ -5,13 +5,16 @@ from java.io import PrintWriter
 from javax.swing import JPanel, JScrollPane, JTextPane
 from javax.swing.text import SimpleAttributeSet, StyleConstants
 from java.awt import BorderLayout, Color
+import re
 
 class BurpExtender(IBurpExtender, IHttpListener, IMessageEditorTabFactory):
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
         callbacks.setExtensionName("HeaderChecker")
+
         self._stdout = PrintWriter(callbacks.getStdout(), True)
+
         callbacks.registerHttpListener(self)
         callbacks.registerMessageEditorTabFactory(self)
 
@@ -23,6 +26,7 @@ class BurpExtender(IBurpExtender, IHttpListener, IMessageEditorTabFactory):
             if response:
                 analyzedResponse = self._helpers.analyzeResponse(response)
                 headers = analyzedResponse.getHeaders()
+
                 results = self.checkSecurityHeaders(headers)
                 messageInfo.setComment("\n".join([h[1] if h[2] else "{}: Missing".format(h[0]) for h in results]))
 
@@ -32,30 +36,25 @@ class BurpExtender(IBurpExtender, IHttpListener, IMessageEditorTabFactory):
             "Content-Security-Policy",
             "X-Content-Type-Options"
         ]
-
         results = []
-
         for header in securityHeaders:
             header_line = next((h for h in headers if h.startswith(header)), None)
-            results.append((header, header_line, header_line is not None))
+            results.append((header, header_line.split(": ", 1)[1] if header_line else None, header_line is not None))
         return results
 
     def checkInfoHeaders(self, headers):
-
         infoHeaders = [
             "X-Powered-By",
             "Server",
             "X-AspNet-Version",
             "X-ASpNetMvc-Version"
         ]
-
+        version_pattern = re.compile(r'\d+(\.\d+)*')
         results = []
-        
         for header in infoHeaders:
             header_line = next((h for h in headers if h.startswith(header)), None)
-            if header_line:
-                header_value = header_line.split(": ", 1)[1] if ": " in header_line else header_line
-                results.append((header, header_value, True))
+            has_version = bool(version_pattern.search(header_line)) if header_line else False
+            results.append((header, header_line.split(": ", 1)[1] if header_line else None, header_line is not None, has_version))
         return results
 
     def createNewInstance(self, controller, editable):
@@ -77,32 +76,37 @@ class SecurityHeadersTab(IMessageEditorTab):
         return self._scrollPane
 
     def isEnabled(self, content, isRequest):
-        return not isRequest
+        return not isRequest  
 
     def setMessage(self, content, isRequest):
         if content is None:
             self._txtInput.setText("")
-        else:
-            analyzedResponse = self._extender._helpers.analyzeResponse(content)
-            headers = analyzedResponse.getHeaders()
-            doc = self._txtInput.getStyledDocument()
+            return
 
-            self._txtInput.setText("")
+        analyzedResponse = self._extender._helpers.analyzeResponse(content)
+        headers = analyzedResponse.getHeaders()
+        doc = self._txtInput.getStyledDocument()
 
-            # Security Headers
-            self._appendText(doc, "Security Headers:\n\n", Color.WHITE)
-            results = self._extender.checkSecurityHeaders(headers)
-            for header, content, is_present in results:
-                color = Color.GREEN if is_present else Color.RED
-                text = u"\u2714 {}: {}\n".format(header, content) if is_present else u"\u2716 {}: Missing\n".format(header)
-                self._appendText(doc, text, color)
+        self._txtInput.setText("")
 
-            # Information Headers
-            results = self._extender.checkInfoHeaders(headers)
-            if results:
-                self._appendText(doc, "\nInformation Headers:\n\n", Color.WHITE)
-                for header, content, _ in results:
-                    self._appendText(doc, u"\u2714 {}: {}\n".format(header, content), Color.RED)
+        # Agregar Security Headers
+        self._appendText(doc, "Security Headers:\n\n", Color.WHITE)
+        results = self._extender.checkSecurityHeaders(headers)
+        for header, value, is_present in results:
+            color = Color.GREEN if is_present else Color.RED
+            text = u"\u2714 {}: {}\n".format(header, value) if is_present else u"\u2716 {}: Missing\n".format(header)
+            self._appendText(doc, text, color)
+
+        # Information Headers
+        info_results = self._extender.checkInfoHeaders(headers)
+        if any(is_present for _, _, is_present, _ in info_results):
+            self._appendText(doc, "\nInformation Headers:\n\n", Color.WHITE)
+            for header, value, is_present, has_version in info_results:
+                if is_present:
+                    color = Color.RED if has_version else Color.YELLOW
+                    flag = u"\u2716" if has_version else u"\u2753"
+                    text = u"{} {}: {}\n".format(flag, header, value)
+                    self._appendText(doc, text, color)
 
         self._currentMessage = content
 
